@@ -567,8 +567,9 @@ def root():
 
 
 @app.post("/reset", response_model=ResetResponse)
-def reset(req: ResetRequest):
-    env_state.reset(req.task_id)
+def reset(req: Optional[ResetRequest] = None):
+    task_id = req.task_id if req else "task_easy"
+    env_state.reset(task_id)
     obs = _build_observation()
     return ResetResponse(observation=obs, info={"task_id": env_state.task_id})
 
