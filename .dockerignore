@@ -8,7 +8,6 @@ __pycache__
 !README.md
 .vscode
 .idea
-uv.lock
 outputs/
 *.egg-info
 dist/
