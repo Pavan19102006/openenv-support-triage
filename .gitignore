@@ -7,7 +7,6 @@ build/
 .env
 .venv
 venv/
-uv.lock
 outputs/
 .vscode/
 .idea/
