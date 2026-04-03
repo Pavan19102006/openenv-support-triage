@@ -170,7 +170,7 @@ def run_task(task_id: str, verbose: bool = False) -> float:
     step_num = 0
     total_reward = 0.0
     history = []
-    max_retries = 3
+    max_retries = 5
 
     # ── Agent loop ───────────────────────────────────────────────────────
     while not done and step_num < 40:
@@ -248,12 +248,12 @@ def run_task(task_id: str, verbose: bool = False) -> float:
                         )
 
             except Exception as e:
-                if verbose:
-                    print(
-                        f"  [RETRY {attempt+1}] LLM call failed: {e}",
-                        file=sys.stderr,
-                    )
-                time.sleep(1 * (attempt + 1))  # Exponential backoff
+                wait_time = 5 * (2 ** attempt)  # 5s, 10s, 20s, 40s, 80s
+                print(
+                    f"  [RETRY {attempt+1}/{max_retries}] LLM error, waiting {wait_time}s: {str(e)[:80]}",
+                    file=sys.stderr,
+                )
+                time.sleep(wait_time)
 
         if action is None:
             print(f"[ERROR] All retries failed at step {step_num}", file=sys.stderr)
@@ -306,7 +306,7 @@ def run_task(task_id: str, verbose: bool = False) -> float:
             )
 
         # Rate-limit to avoid API throttling
-        time.sleep(0.5)
+        time.sleep(2.5)  # Respect rate limits (Groq free: ~30 req/min)
 
     # ── Get final score ──────────────────────────────────────────────────
     final_score = obs.get("current_score", 0.0)
