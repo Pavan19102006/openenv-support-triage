@@ -142,7 +142,7 @@ def run_task(task_id: str, verbose: bool = False) -> float:
     # ── Reset environment ────────────────────────────────────────────────
     try:
         reset_resp = requests.post(
-            f"{ENV_URL}/reset", json={"task_id": task_id}, timeout=30
+            f"{ENV_URL}/stateful/reset", json={"task_id": task_id}, timeout=30
         )
         reset_resp.raise_for_status()
         reset_data = reset_resp.json()
@@ -262,7 +262,7 @@ def run_task(task_id: str, verbose: bool = False) -> float:
         # ── Step environment ─────────────────────────────────────────────
         try:
             step_resp = requests.post(
-                f"{ENV_URL}/step",
+                f"{ENV_URL}/stateful/step",
                 json={"action": action},
                 timeout=30,
             )

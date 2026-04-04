@@ -1,8 +1,11 @@
 """
 FastAPI application for the Ticket Triage Environment.
 
-Custom server that wraps TriageEnvironment with the exact API
-the OpenEnv checker and test suite expect.
+Uses the OpenEnv framework's create_fastapi_app to generate the standard
+API endpoints (reset, step, state, health, schema, ws) automatically.
+
+Custom stateful endpoints are added on top for the test suite and
+inference agent which need persistent state across HTTP calls.
 
 Usage:
     uvicorn server.app:app --host 0.0.0.0 --port 7860
@@ -12,41 +15,108 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fastapi import FastAPI
-from pydantic import BaseModel, Field
-from typing import Dict, Any, Optional, List
-
+from models import TriageAction, TriageObservation
 from server.triage_environment import TriageEnvironment
 
-# ── Global environment instance (persistent across requests) ──────────────
+# ── Create the app using the OpenEnv framework ───────────────────────────
+# create_fastapi_app wraps TriageEnvironment with standard OpenEnv endpoints:
+#   POST /reset, POST /step, GET /state, GET /health, GET /schema, WS /ws
 
-env = TriageEnvironment()
-episode_reward = 0.0
-current_task_id = "task_easy"
-is_done = False
+try:
+    from openenv.core.env_server import create_fastapi_app
+    app = create_fastapi_app(TriageEnvironment, TriageAction, TriageObservation)
+except ImportError:
+    # Fallback if create_fastapi_app is not available in this version
+    from fastapi import FastAPI
+    app = FastAPI(
+        title="Ticket Triage OpenEnv",
+        description="IT Helpdesk Ticket Triage Environment for OpenEnv",
+        version="1.0.0",
+    )
 
-# ── Request / Response models ─────────────────────────────────────────────
+# ── Stateful endpoints for test suite & inference agent ───────────────────
+# The OpenEnv HTTP endpoints are stateless (each request creates a new env).
+# For full episode interaction, we keep a persistent global env instance.
 
-class ResetRequest(BaseModel):
+from pydantic import BaseModel
+from typing import Optional
+
+_env = TriageEnvironment()
+_episode_reward = 0.0
+_current_task_id = "task_easy"
+_is_done = False
+
+
+class _ResetReq(BaseModel):
     task_id: str = "task_easy"
     seed: Optional[int] = None
     episode_id: Optional[str] = None
 
-class ActionPayload(BaseModel):
+
+class _ActionPayload(BaseModel):
     action_type: str = "noop"
     ticket_id: str = ""
     payload: str = ""
 
-class StepRequest(BaseModel):
-    action: ActionPayload
 
-# ── FastAPI App ───────────────────────────────────────────────────────────
+class _StepReq(BaseModel):
+    action: _ActionPayload
 
-app = FastAPI(
-    title="Ticket Triage OpenEnv",
-    description="IT Helpdesk Ticket Triage Environment for OpenEnv",
-    version="1.0.0",
-)
+
+@app.post("/stateful/reset")
+def stateful_reset(request: _ResetReq = None):
+    """Stateful reset — persists env state for subsequent /stateful/step calls."""
+    global _episode_reward, _current_task_id, _is_done
+
+    if request is None:
+        request = _ResetReq()
+
+    _episode_reward = 0.0
+    _current_task_id = request.task_id
+    _is_done = False
+
+    obs = _env.reset(
+        seed=request.seed,
+        episode_id=request.episode_id,
+        task_id=request.task_id,
+    )
+    obs_dict = obs.model_dump(exclude={"reward", "done", "metadata"})
+    return {"observation": obs_dict, "reward": None, "done": False}
+
+
+@app.post("/stateful/step")
+def stateful_step(request: _StepReq):
+    """Stateful step — uses the env persisted from /stateful/reset."""
+    global _episode_reward, _is_done
+
+    action = TriageAction(
+        action_type=request.action.action_type,
+        ticket_id=request.action.ticket_id,
+        payload=request.action.payload,
+    )
+    obs = _env.step(action)
+
+    reward = obs.reward if obs.reward is not None else 0.0
+    done = obs.done
+    _episode_reward += reward
+    _is_done = done
+
+    obs_dict = obs.model_dump(exclude={"reward", "done", "metadata"})
+    return {"observation": obs_dict, "reward": reward, "done": done}
+
+
+@app.get("/stateful/state")
+def stateful_state():
+    """Get current stateful environment state."""
+    score = _env._compute_score()
+    state_data = _env.state
+    state_dict = state_data.model_dump() if hasattr(state_data, "model_dump") else {}
+    state_dict["task_id"] = _current_task_id
+    state_dict["max_steps"] = _env._max_steps
+    state_dict["score"] = round(score, 4)
+    state_dict["done"] = _is_done
+    state_dict["episode_reward"] = round(_episode_reward, 4)
+    return state_dict
 
 
 @app.get("/")
@@ -57,100 +127,6 @@ def root():
         "version": "1.0.0",
         "tasks": ["task_easy", "task_medium", "task_hard"],
     }
-
-
-@app.get("/health")
-def health():
-    """Health check endpoint."""
-    return {"status": "healthy"}
-
-
-@app.post("/reset")
-def reset(request: ResetRequest = None):
-    """Reset the environment and return the initial observation.
-
-    Returns the OpenEnv-standard ResetResponse format:
-    {"observation": {...}, "reward": null, "done": false}
-    """
-    global episode_reward, current_task_id, is_done
-
-    if request is None:
-        request = ResetRequest()
-
-    episode_reward = 0.0
-    current_task_id = request.task_id
-    is_done = False
-
-    obs = env.reset(
-        seed=request.seed,
-        episode_id=request.episode_id,
-        task_id=request.task_id,
-    )
-
-    # Serialize observation excluding reward, done, metadata (standard OpenEnv format)
-    obs_dict = obs.model_dump(exclude={"reward", "done", "metadata"})
-
-    return {
-        "observation": obs_dict,
-        "reward": None,
-        "done": False,
-    }
-
-
-@app.post("/step")
-def step(request: StepRequest):
-    """Execute an action and return observation + reward.
-
-    Returns the OpenEnv-standard StepResponse format:
-    {"observation": {...}, "reward": float, "done": bool}
-    """
-    global episode_reward, is_done
-
-    from models import TriageAction
-    action = TriageAction(
-        action_type=request.action.action_type,
-        ticket_id=request.action.ticket_id,
-        payload=request.action.payload,
-    )
-
-    obs = env.step(action)
-
-    reward = obs.reward if obs.reward is not None else 0.0
-    done = obs.done
-    episode_reward += reward
-    is_done = done
-
-    # Serialize observation excluding reward, done, metadata (standard OpenEnv format)
-    obs_dict = obs.model_dump(exclude={"reward", "done", "metadata"})
-
-    return {
-        "observation": obs_dict,
-        "reward": reward,
-        "done": done,
-    }
-
-
-@app.get("/state")
-def get_state():
-    """Get current environment state."""
-    score = env._compute_score()
-    state_data = env.state
-    if hasattr(state_data, "model_dump"):
-        state_dict = state_data.model_dump()
-    else:
-        state_dict = {
-            "episode_id": getattr(state_data, "episode_id", None),
-            "step_count": getattr(state_data, "step_count", 0),
-        }
-
-    # Add extra info
-    state_dict["task_id"] = current_task_id
-    state_dict["max_steps"] = env._max_steps
-    state_dict["score"] = round(score, 4)
-    state_dict["done"] = is_done
-    state_dict["episode_reward"] = round(episode_reward, 4)
-
-    return state_dict
 
 
 def main():

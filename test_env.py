@@ -27,13 +27,13 @@ def log(msg, ok=True):
 
 
 def reset(task_id):
-    r = requests.post(f"{BASE}/reset", json={"task_id": task_id}, timeout=10)
+    r = requests.post(f"{BASE}/stateful/reset", json={"task_id": task_id}, timeout=10)
     r.raise_for_status()
     return r.json()
 
 
 def step(action_type, ticket_id="", payload=""):
-    r = requests.post(f"{BASE}/step", json={
+    r = requests.post(f"{BASE}/stateful/step", json={
         "action": {"action_type": action_type, "ticket_id": ticket_id, "payload": payload}
     }, timeout=10)
     r.raise_for_status()
@@ -41,7 +41,7 @@ def step(action_type, ticket_id="", payload=""):
 
 
 def state():
-    r = requests.get(f"{BASE}/state", timeout=10)
+    r = requests.get(f"{BASE}/stateful/state", timeout=10)
     r.raise_for_status()
     return r.json()
 
@@ -353,12 +353,22 @@ def test_openenv_response_format():
     print("\n🔬 Test 10: OpenEnv Response Format")
 
     # Test reset response format
+    # Test the standard OpenEnv /reset endpoint (from create_fastapi_app)
+    r = requests.post(f"{BASE}/reset", json={}, timeout=10)
+    data = r.json()
+    has_observation = "observation" in data
+    has_reward = "reward" in data
+    has_done = "done" in data
+    log(f"OpenEnv /reset response has observation={has_observation}, reward={has_reward}, done={has_done}",
+        has_observation and has_reward and has_done)
+
+    # Test stateful reset format
     data = reset("task_easy")
     has_observation = "observation" in data
     has_reward = "reward" in data
     has_done = "done" in data
     no_info = "info" not in data
-    log(f"Reset response has observation={has_observation}, reward={has_reward}, done={has_done}, no_info={no_info}",
+    log(f"Stateful reset has observation={has_observation}, reward={has_reward}, done={has_done}, no_info={no_info}",
         has_observation and has_reward and has_done and no_info)
     log(f"Reset reward is None", data["reward"] is None)
     log(f"Reset done is False", data["done"] is False)
