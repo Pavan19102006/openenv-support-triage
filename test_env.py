@@ -9,7 +9,7 @@ import sys
 import json
 import requests
 
-BASE = "http://localhost:8000"
+BASE = "http://localhost:7860"
 PASS = 0
 FAIL = 0
 TOTAL = 0
@@ -54,7 +54,7 @@ def test_health_endpoints():
     print("\n🔬 Test 1: Health & Root Endpoints")
 
     r = requests.get(f"{BASE}/health")
-    log(f"GET /health → {r.status_code}", r.status_code == 200 and r.json()["status"] == "ok")
+    log(f"GET /health → {r.status_code}", r.status_code == 200 and r.json()["status"] == "healthy")
 
     r = requests.get(f"{BASE}/")
     data = r.json()
@@ -62,7 +62,7 @@ def test_health_endpoints():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TEST 2: Reset Endpoint
+# TEST 2: Reset Endpoint (OpenEnv format: observation + reward + done)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def test_reset():
@@ -71,12 +71,18 @@ def test_reset():
     for task_id, expected_count in [("task_easy", 2), ("task_medium", 3), ("task_hard", 4)]:
         data = reset(task_id)
         obs = data["observation"]
+
+        # Verify OpenEnv response format
+        has_reward = "reward" in data
+        has_done = "done" in data
         log(
-            f"Reset {task_id}: {len(obs['tickets'])} tickets, step={obs['step_number']}, score={obs['current_score']}",
+            f"Reset {task_id}: {len(obs['tickets'])} tickets, step={obs['step_number']}, score={obs['current_score']}, format_ok={has_reward and has_done}",
             len(obs["tickets"]) == expected_count
             and obs["step_number"] == 0
             and obs["current_score"] == 0.0
             and obs["pending_count"] == expected_count
+            and has_reward
+            and has_done
         )
 
     # Invalid task falls back to task_easy
@@ -205,11 +211,11 @@ def test_perfect_hard():
         total_reward += r["reward"]
         log(f"{label} → reward={r['reward']}", r["reward"] >= 0)
 
-    # T7: technical, high, respond, escalate, close
+    # T7: technical, critical, respond, escalate, close
     for atype, tid, payload, label in [
         ("categorize", "T7", "technical", "T7 cat"),
-        ("set_priority", "T7", "high", "T7 pri"),
-        ("respond", "T7", "We're aware of the API v2 error and our engineering team is actively investigating the 500 errors on the /api/v2/orders endpoint. We'll provide an update shortly.", "T7 resp"),
+        ("set_priority", "T7", "critical", "T7 pri"),
+        ("respond", "T7", "We're aware of the API v2 error and our engineering team is actively investigating the 500 errors on the /api/v2/orders endpoint. This is our top priority and we'll provide an update shortly.", "T7 resp"),
         ("escalate", "T7", "", "T7 escalate"),
         ("close", "T7", "", "T7 close"),
     ]:
@@ -217,23 +223,22 @@ def test_perfect_hard():
         total_reward += r["reward"]
         log(f"{label} → reward={r['reward']}", r["reward"] >= 0)
 
-    # T8: billing, high, respond (empathetically), escalate, close
+    # T8: billing, low, respond (upgrade inquiry), close — NO escalation
     for atype, tid, payload, label in [
         ("categorize", "T8", "billing", "T8 cat"),
-        ("set_priority", "T8", "high", "T8 pri"),
-        ("respond", "T8", "We completely understand your frustration and sincerely apologize for this terrible experience. A full refund for order #5566 will be processed immediately, and we'll ensure you receive proper compensation.", "T8 resp"),
-        ("escalate", "T8", "", "T8 escalate"),
+        ("set_priority", "T8", "low", "T8 pri"),
+        ("respond", "T8", "Thank you for your interest in upgrading your plan! Our Enterprise plan includes advanced features like priority support, custom integrations, and dedicated account management. I'd be happy to help you with the upgrade process.", "T8 resp"),
         ("close", "T8", "", "T8 close"),
     ]:
         r = step(atype, tid, payload)
         total_reward += r["reward"]
         log(f"{label} → reward={r['reward']}", r["reward"] >= 0)
 
-    # T9: general, low, respond, close
+    # T9: security, critical, escalate ONLY (legal data breach — no respond!), close
     for atype, tid, payload, label in [
-        ("categorize", "T9", "general", "T9 cat"),
-        ("set_priority", "T9", "low", "T9 pri"),
-        ("respond", "T9", "Our customer service phone number is 1-800-SUPPORT and our business hours are Monday-Friday 9AM-6PM EST. You can also reach us via live chat on our contact page.", "T9 resp"),
+        ("categorize", "T9", "security", "T9 cat"),
+        ("set_priority", "T9", "critical", "T9 pri"),
+        ("escalate", "T9", "", "T9 escalate"),
         ("close", "T9", "", "T9 close"),
     ]:
         r = step(atype, tid, payload)
@@ -270,9 +275,9 @@ def test_edge_cases():
     r = step("respond", "T1", "ok")
     log(f"Short response → reward={r['reward']}", r["reward"] < 0)
 
-    # Note too short
+    # Note (any length is accepted)
     r = step("add_note", "T1", "hi")
-    log(f"Short note → reward={r['reward']}", r["reward"] < 0)
+    log(f"Short note → reward={r['reward']}", r["reward"] >= 0)
 
     # Noop penalty
     r = step("noop", "", "")
@@ -282,9 +287,9 @@ def test_edge_cases():
     r = step("fly_ticket", "T1", "")
     log(f"Unknown action → reward={r['reward']}", r["reward"] < 0)
 
-    # Wrong category still processes
+    # Wrong category gives partial credit (not negative)
     r = step("categorize", "T1", "shipping")
-    log(f"Wrong category → reward={r['reward']}", r["reward"] < 0)
+    log(f"Wrong category → reward={r['reward']}", r["reward"] > 0)
 
     # Now fix and close properly
     r = step("categorize", "T1", "technical")
@@ -337,7 +342,41 @@ def test_double_close():
     step("close", "T1", "")
 
     r = step("close", "T1", "")
-    log(f"Double close → reward={r['reward']}", r["reward"] == 0.0)
+    log(f"Double close → reward={r['reward']}", r["reward"] < 0)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TEST 10: OpenEnv Response Format Validation
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def test_openenv_response_format():
+    print("\n🔬 Test 10: OpenEnv Response Format")
+
+    # Test reset response format
+    data = reset("task_easy")
+    has_observation = "observation" in data
+    has_reward = "reward" in data
+    has_done = "done" in data
+    no_info = "info" not in data
+    log(f"Reset response has observation={has_observation}, reward={has_reward}, done={has_done}, no_info={no_info}",
+        has_observation and has_reward and has_done and no_info)
+    log(f"Reset reward is None", data["reward"] is None)
+    log(f"Reset done is False", data["done"] is False)
+
+    # Test step response format
+    r = step("categorize", "T1", "technical")
+    has_observation = "observation" in r
+    has_reward = "reward" in r
+    has_done = "done" in r
+    no_info = "info" not in r
+    log(f"Step response has observation={has_observation}, reward={has_reward}, done={has_done}, no_info={no_info}",
+        has_observation and has_reward and has_done and no_info)
+    log(f"Step reward is float", isinstance(r["reward"], (int, float)))
+    log(f"Step done is bool", isinstance(r["done"], bool))
+
+    # Test health response format
+    h = requests.get(f"{BASE}/health").json()
+    log(f"Health status is 'healthy'", h["status"] == "healthy")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -364,6 +403,7 @@ if __name__ == "__main__":
     test_state_endpoint()
     test_step_limit()
     test_double_close()
+    test_openenv_response_format()
 
     print("\n" + "=" * 60)
     print(f"  Results: {PASS} passed / {FAIL} failed / {TOTAL} total")

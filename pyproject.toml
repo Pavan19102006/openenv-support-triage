@@ -1,23 +1,32 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "openenv-ticket-triage"
 version = "1.0.0"
-description = "Customer support ticket triage OpenEnv environment"
-authors = [
-    { name = "Support Team" }
-]
+description = "IT Helpdesk Ticket Triage OpenEnv Environment"
 requires-python = ">=3.10"
 dependencies = [
+    # Core OpenEnv dependencies (required for server functionality)
+    "openenv-core[core] @ git+https://github.com/meta-pytorch/OpenEnv.git@v0.2.3",
     "fastapi>=0.115.0",
-    "uvicorn>=0.30.0",
-    "pydantic>=2.9.0",
-    "openai>=1.0.0",
+    "pydantic>=2.0.0",
+    "uvicorn>=0.24.0",
     "requests>=2.31.0",
-    "openenv-core>=0.2.0",
+    "openai>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.0.0",
 ]
 
 [project.scripts]
-server = "server.app:main"
+server = "ticket_triage.server.app:main"
+
+[tool.setuptools]
+include-package-data = true
+packages = ["ticket_triage", "ticket_triage.server"]
+package-dir = { "ticket_triage" = ".", "ticket_triage.server" = "server" }
