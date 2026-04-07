@@ -131,16 +131,16 @@ Each observation contains:
 
 ### Task Hard (4 tickets)
 | Ticket | Subject | Expected Actions |
-|--------|---------|-----------------|
-| T6 | Account hacked | categorize=security, priority=critical, **escalate only** (no response!) |
-| T7 | API 500 error | categorize=technical, priority=high, respond, **escalate**, close |
-| T8 | Furious customer (broken laptop) | categorize=billing, priority=high, respond empathetically, **escalate**, close |
-| T9 | Business hours question | categorize=general, priority=low, respond, close |
+|--------|---------|-----------------| 
+| T6 | Account hacked | categorize=security, priority=critical, **escalate only** (no response!), close |
+| T7 | API 500 error | categorize=technical, priority=critical, respond, **escalate**, close |
+| T8 | Want to upgrade plan | categorize=billing, priority=low, respond, close |
+| T9 | Legal threat - data breach | categorize=security, priority=critical, **escalate only** (no response!), close |
 
 **Difficulty**: 
-- T6 requires **restraint** — security incidents should be escalated, NOT responded to (leaking information risk)
-- T8 requires **empathy** — angry customer, response must acknowledge their frustration
-- Four tickets with different priorities forces genuine triage
+- T6 & T9 require **restraint** — security incidents should be escalated, NOT responded to (leaking information risk)
+- T7 is a **production outage** requiring both response and escalation
+- Four tickets with different priorities and handling strategies forces genuine triage
 
 ---
 

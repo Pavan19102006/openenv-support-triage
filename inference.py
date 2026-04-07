@@ -19,21 +19,45 @@ import os
 import sys
 import json
 import time
+import signal
 import argparse
 import requests
 from datetime import datetime, timezone
 from openai import OpenAI
 
 # ── Configuration ────────────────────────────────────────────────────────────
-# Defaults are set ONLY for API_BASE_URL and MODEL_NAME (not HF_TOKEN)
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
 HF_TOKEN = os.getenv("HF_TOKEN")
 ENV_URL = os.getenv("ENV_URL", "http://localhost:7860")
-
-# Optional — if you use from_docker_image():
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
+
+# ── Timeout constants ────────────────────────────────────────────────────────
+
+GLOBAL_TIMEOUT_S = 25 * 60       # 25 minutes hard cap for entire run
+PER_TASK_TIMEOUT_S = 7 * 60      # 7 minutes per task
+LLM_CALL_TIMEOUT_S = 30          # 30 seconds per LLM call
+HTTP_TIMEOUT_S = 15              # 15 seconds for env HTTP calls
+MAX_RETRIES = 3                  # Max LLM retries per step
+RETRY_BACKOFF_CAP_S = 5          # Max backoff wait between retries
+STEP_DELAY_S = 0.3               # Delay between steps (rate limiting)
+MAX_HISTORY_MESSAGES = 12        # Keep last 6 turns (12 messages)
+
+# ── Global start time for timeout enforcement ────────────────────────────────
+
+_global_start = time.monotonic()
+
+
+def _check_global_timeout():
+    """Raise TimeoutError if global time budget is exhausted."""
+    elapsed = time.monotonic() - _global_start
+    if elapsed > GLOBAL_TIMEOUT_S:
+        raise TimeoutError(
+            f"Global timeout reached ({GLOBAL_TIMEOUT_S}s). "
+            f"Elapsed: {elapsed:.0f}s"
+        )
+
 
 # ── Enhanced System Prompt ───────────────────────────────────────────────────
 
@@ -114,7 +138,6 @@ def parse_json_safely(text: str) -> dict:
     # Remove markdown code fences if present
     if text.startswith("```"):
         lines = text.split("\n")
-        # Remove first and last lines (fences)
         lines = [l for l in lines if not l.strip().startswith("```")]
         text = "\n".join(lines).strip()
 
@@ -137,12 +160,21 @@ def parse_json_safely(text: str) -> dict:
 
 def run_task(task_id: str, verbose: bool = False) -> float:
     """Run one task and return the final grader score."""
-    client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
+    task_start = time.monotonic()
+
+    client = OpenAI(
+        base_url=API_BASE_URL,
+        api_key=HF_TOKEN,
+        timeout=LLM_CALL_TIMEOUT_S,       # Connection + read timeout
+        max_retries=0,                      # We handle retries ourselves
+    )
 
     # ── Reset environment ────────────────────────────────────────────────
     try:
         reset_resp = requests.post(
-            f"{ENV_URL}/stateful/reset", json={"task_id": task_id}, timeout=30
+            f"{ENV_URL}/stateful/reset",
+            json={"task_id": task_id},
+            timeout=HTTP_TIMEOUT_S,
         )
         reset_resp.raise_for_status()
         reset_data = reset_resp.json()
@@ -151,6 +183,7 @@ def run_task(task_id: str, verbose: bool = False) -> float:
         return 0.0
 
     obs = reset_data["observation"]
+    max_steps = obs.get("max_steps", 20)
 
     # ── [START] log ──────────────────────────────────────────────────────
     print(
@@ -160,7 +193,7 @@ def run_task(task_id: str, verbose: bool = False) -> float:
                 "task_id": task_id,
                 "timestamp": now_iso(),
                 "ticket_count": len(obs["tickets"]),
-                "max_steps": obs.get("max_steps", 20),
+                "max_steps": max_steps,
             }
         )
     )
@@ -170,11 +203,20 @@ def run_task(task_id: str, verbose: bool = False) -> float:
     step_num = 0
     total_reward = 0.0
     history = []
-    max_retries = 5
 
-    # ── Agent loop ───────────────────────────────────────────────────────
-    while not done and step_num < 40:
+    # ── Agent loop — capped to task's actual max_steps ───────────────────
+    while not done and step_num < max_steps:
         step_num += 1
+
+        # Check timeouts
+        _check_global_timeout()
+        task_elapsed = time.monotonic() - task_start
+        if task_elapsed > PER_TASK_TIMEOUT_S:
+            print(
+                f"[WARN] Task {task_id} exceeded {PER_TASK_TIMEOUT_S}s, stopping early.",
+                file=sys.stderr,
+            )
+            break
 
         # Build the user prompt with current observation
         ticket_summaries = []
@@ -182,7 +224,7 @@ def run_task(task_id: str, verbose: bool = False) -> float:
             summary = {
                 "id": t["id"],
                 "subject": t["subject"],
-                "body": t["body"][:500],  # Truncate very long bodies
+                "body": t["body"][:300],  # Truncate to save tokens
                 "sender": t.get("sender", "unknown"),
                 "sentiment": t.get("sentiment", "neutral"),
                 "status": t.get("status", "open"),
@@ -200,7 +242,7 @@ def run_task(task_id: str, verbose: bool = False) -> float:
             f"Pending: {obs.get('pending_count', '?')} | "
             f"Resolved: {obs.get('resolved_count', '?')} | "
             f"Escalated: {obs.get('escalated_count', '?')}\n"
-            f"Step: {obs.get('step_number', step_num)}/{obs.get('max_steps', 20)}\n\n"
+            f"Step: {obs.get('step_number', step_num)}/{max_steps}\n\n"
             f"Process the tickets one at a time following the strategy. "
             f"What is your next action? Return a single JSON object."
         )
@@ -213,13 +255,15 @@ def run_task(task_id: str, verbose: bool = False) -> float:
 
         # Call LLM with retry logic
         action = None
-        for attempt in range(max_retries):
+        for attempt in range(MAX_RETRIES):
             try:
+                _check_global_timeout()
+
                 llm_resp = client.chat.completions.create(
                     model=MODEL_NAME,
                     messages=messages,
-                    temperature=0.05,  # Low temperature for consistent behavior
-                    max_tokens=500,
+                    temperature=0.05,
+                    max_tokens=256,  # Actions are small JSON — no need for 500
                     response_format={"type": "json_object"},
                 )
                 action_text = llm_resp.choices[0].message.content.strip()
@@ -235,9 +279,9 @@ def run_task(task_id: str, verbose: bool = False) -> float:
                     history.append({"role": "user", "content": prompt})
                     history.append({"role": "assistant", "content": action_text})
 
-                    # Keep history manageable (last 12 turns = 24 messages)
-                    if len(history) > 24:
-                        history = history[-24:]
+                    # Keep history manageable (last 6 turns = 12 messages)
+                    if len(history) > MAX_HISTORY_MESSAGES:
+                        history = history[-MAX_HISTORY_MESSAGES:]
 
                     break
                 else:
@@ -247,10 +291,12 @@ def run_task(task_id: str, verbose: bool = False) -> float:
                             file=sys.stderr,
                         )
 
+            except TimeoutError:
+                raise  # Re-raise global timeout
             except Exception as e:
-                wait_time = 5 * (2 ** attempt)  # 5s, 10s, 20s, 40s, 80s
+                wait_time = min(2 * (attempt + 1), RETRY_BACKOFF_CAP_S)
                 print(
-                    f"  [RETRY {attempt+1}/{max_retries}] LLM error, waiting {wait_time}s: {str(e)[:80]}",
+                    f"  [RETRY {attempt+1}/{MAX_RETRIES}] LLM error, waiting {wait_time}s: {str(e)[:80]}",
                     file=sys.stderr,
                 )
                 time.sleep(wait_time)
@@ -264,7 +310,7 @@ def run_task(task_id: str, verbose: bool = False) -> float:
             step_resp = requests.post(
                 f"{ENV_URL}/stateful/step",
                 json={"action": action},
-                timeout=30,
+                timeout=HTTP_TIMEOUT_S,
             )
             step_resp.raise_for_status()
             step_data = step_resp.json()
@@ -305,13 +351,14 @@ def run_task(task_id: str, verbose: bool = False) -> float:
                 file=sys.stderr,
             )
 
-        # Rate-limit to avoid API throttling
-        time.sleep(2.5)  # Respect rate limits (Groq free: ~30 req/min)
+        # Minimal delay to avoid API throttling
+        time.sleep(STEP_DELAY_S)
 
     # ── Get final score ──────────────────────────────────────────────────
     final_score = obs.get("current_score", 0.0)
 
     # ── [END] log ────────────────────────────────────────────────────────
+    task_elapsed = time.monotonic() - task_start
     print(
         json.dumps(
             {
@@ -320,6 +367,7 @@ def run_task(task_id: str, verbose: bool = False) -> float:
                 "steps": step_num,
                 "total_reward": round(total_reward, 4),
                 "final_score": round(final_score, 4),
+                "elapsed_seconds": round(task_elapsed, 1),
                 "timestamp": now_iso(),
             }
         )
@@ -350,6 +398,8 @@ if __name__ == "__main__":
     print(f"API: {API_BASE_URL}", file=sys.stderr)
     print(f"Model: {MODEL_NAME}", file=sys.stderr)
     print(f"Env: {ENV_URL}", file=sys.stderr)
+    print(f"Global timeout: {GLOBAL_TIMEOUT_S}s", file=sys.stderr)
+    print(f"Per-task timeout: {PER_TASK_TIMEOUT_S}s", file=sys.stderr)
     print(f"========================================", file=sys.stderr)
 
     if not HF_TOKEN:
@@ -367,13 +417,19 @@ if __name__ == "__main__":
     scores = {}
     for task in tasks:
         print(f"\n--- Starting {task} ---", file=sys.stderr)
-        score = run_task(task, verbose=args.verbose)
+        try:
+            _check_global_timeout()
+            score = run_task(task, verbose=args.verbose)
+        except TimeoutError as e:
+            print(f"[TIMEOUT] {e}", file=sys.stderr)
+            score = 0.0
         scores[task] = score
         print(f"--- {task}: score = {score:.4f} ---\n", file=sys.stderr)
-        time.sleep(1)
+        time.sleep(0.5)  # Brief pause between tasks
 
+    elapsed_total = time.monotonic() - _global_start
     print(f"\n{'='*40}", file=sys.stderr)
-    print(f"  Final Scores", file=sys.stderr)
+    print(f"  Final Scores (total time: {elapsed_total:.0f}s)", file=sys.stderr)
     print(f"{'='*40}", file=sys.stderr)
     for task, score in scores.items():
         bar = "█" * int(score * 20) + "░" * (20 - int(score * 20))
