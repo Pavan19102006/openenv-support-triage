@@ -186,18 +186,7 @@ def run_task(task_id: str, verbose: bool = False) -> float:
     max_steps = obs.get("max_steps", 20)
 
     # ── [START] log ──────────────────────────────────────────────────────
-    print(
-        json.dumps(
-            {
-                "event": "[START]",
-                "task_id": task_id,
-                "timestamp": now_iso(),
-                "ticket_count": len(obs["tickets"]),
-                "max_steps": max_steps,
-            }
-        )
-    )
-    sys.stdout.flush()
+    print(f"[START] task={task_id} ticket_count={len(obs['tickets'])} max_steps={max_steps}", flush=True)
 
     done = False
     step_num = 0
@@ -324,24 +313,15 @@ def run_task(task_id: str, verbose: bool = False) -> float:
         total_reward += reward
 
         # ── [STEP] log ───────────────────────────────────────────────────
-        step_log = {
-            "event": "[STEP]",
-            "task_id": task_id,
-            "step": step_num,
-            "action": {
-                "action_type": action.get("action_type", "noop"),
-                "ticket_id": action.get("ticket_id", ""),
-                "payload": str(action.get("payload", ""))[:100],
-            },
-            "reward": round(reward, 4),
-            "total_reward": round(total_reward, 4),
-            "done": done,
-            "feedback": obs.get("last_feedback", ""),
-            "current_score": obs.get("current_score", 0.0),
-            "timestamp": now_iso(),
-        }
-        print(json.dumps(step_log))
-        sys.stdout.flush()
+        act_type = action.get("action_type", "noop")
+        act_tid = action.get("ticket_id", "")
+        score_now = obs.get("current_score", 0.0)
+        print(
+            f"[STEP] task={task_id} step={step_num} action={act_type} ticket={act_tid} "
+            f"reward={round(reward, 4)} total_reward={round(total_reward, 4)} "
+            f"score={round(score_now, 4)} done={done}",
+            flush=True,
+        )
 
         if verbose:
             print(
@@ -360,19 +340,10 @@ def run_task(task_id: str, verbose: bool = False) -> float:
     # ── [END] log ────────────────────────────────────────────────────────
     task_elapsed = time.monotonic() - task_start
     print(
-        json.dumps(
-            {
-                "event": "[END]",
-                "task_id": task_id,
-                "steps": step_num,
-                "total_reward": round(total_reward, 4),
-                "final_score": round(final_score, 4),
-                "elapsed_seconds": round(task_elapsed, 1),
-                "timestamp": now_iso(),
-            }
-        )
+        f"[END] task={task_id} score={round(final_score, 4)} steps={step_num} "
+        f"total_reward={round(total_reward, 4)} elapsed={round(task_elapsed, 1)}s",
+        flush=True,
     )
-    sys.stdout.flush()
 
     return final_score
 
